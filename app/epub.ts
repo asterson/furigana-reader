@@ -142,6 +142,7 @@ export async function getSpine(book: BookState, index: number, cache: Map<string
   const tocAnchors = new Set(book.toc.filter((item) => item.path === spineItem.path && item.anchor).map((item) => item.anchor));
   const chunks: string[] = [], anchorToChunk = new Map<string, number>();
   let group: Node[] = [], chars = 0, elements = 0, anchors: string[] = [];
+  let keepWithNext = false;
   const flush = () => {
     if (!group.length) return;
     const chunkIndex = chunks.length;
@@ -154,9 +155,24 @@ export async function getSpine(book: BookState, index: number, cache: Map<string
     const nodeAnchors = element ? [element, ...element.querySelectorAll("[id],[name]")].flatMap((item) => [item.getAttribute("id"), item.getAttribute("name")].filter(Boolean) as string[]) : [];
     const tocBoundary = nodeAnchors.some((anchor) => tocAnchors.has(anchor));
     const nodeChars = node.textContent?.length || 0;
-    if (group.length && (tocBoundary || elements >= 45 || chars + nodeChars > 5500)) flush();
+    const isFullPageImage = Boolean(element?.matches("div.s1"));
+    const isImageOnly = Boolean(!isFullPageImage && element?.querySelector("img,svg") && nodeChars < 20);
+    const groupHasContent = group.some((item) => item.nodeType === Node.ELEMENT_NODE || Boolean(item.textContent?.trim()));
+    const isMeaningful = Boolean(element && (node.textContent?.trim() || element.querySelector("img,svg")));
+
+    // Ordinary image headings begin a fresh page and stay attached to the first
+    // meaningful block after them. Full-page illustrations remain standalone.
+    if (isImageOnly && groupHasContent) flush();
+    if (!keepWithNext && group.length && (tocBoundary || elements >= 45 || chars + nodeChars > 5500)) flush();
     group.push(node); chars += nodeChars; if (element) elements += 1; anchors.push(...nodeAnchors);
-    if (element?.matches("div.s1") || (element?.querySelector("img,svg") && nodeChars < 20)) flush();
+    if (isFullPageImage) {
+      keepWithNext = false;
+      flush();
+    } else if (isImageOnly) {
+      keepWithNext = true;
+    } else if (keepWithNext && isMeaningful) {
+      keepWithNext = false;
+    }
   });
   flush();
   const result = { chunks: chunks.length ? chunks : [""], anchorToChunk, bodyClass: body.getAttribute("class") || "" };
