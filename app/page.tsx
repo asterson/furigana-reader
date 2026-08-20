@@ -1,11 +1,20 @@
 "use client";
 
 import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from "react";
+import { layout as layoutText, prepare as prepareText } from "@chenglou/pretext";
 import { BookState, CachedSpine, PageRef, chapterPages, cleanText, getSpine, mediaType, parseEpub, resolvePath, splitHref } from "./epub";
 
 type ReadingMode = "book" | "vertical" | "horizontal";
 type SpeechNode = { node: Text; nodeStart: number; textStart: number; textEnd: number };
 type SpeechPlan = { text: string; nodes: SpeechNode[] };
+
+function textForLayout(root: Element) {
+  const clone = root.cloneNode(true) as Element;
+  clone.querySelectorAll("rt,rp,script,style").forEach((node) => node.remove());
+  clone.querySelectorAll("br").forEach((node) => node.replaceWith("\n"));
+  clone.querySelectorAll("p,div,li,h1,h2,h3,h4,h5,h6,blockquote,figcaption,caption,tr").forEach((node) => node.append("\n"));
+  return (clone.textContent || "").replace(/[\t ]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+}
 
 function buildSpeechPlan(doc: Document, selectedRange?: Range): SpeechPlan {
   const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
@@ -182,7 +191,7 @@ export default function Home() {
         body.reader-vertical{width:100%!important;height:100%!important;min-height:0!important;padding:0!important;overflow:hidden!important}
         body.reader-vertical #reader-scroll{position:relative;box-sizing:border-box;width:100%;height:100%;overflow-x:auto;overflow-y:hidden;direction:ltr;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}
         body.reader-vertical #reader-track{position:relative;box-sizing:border-box;width:100%;min-width:100%;height:100%;overflow:visible}
-        body.reader-vertical #reader-content{box-sizing:border-box;width:100%;min-width:100%;height:100%;padding:3rem;direction:ltr;writing-mode:vertical-rl!important;-webkit-writing-mode:vertical-rl!important;line-height:1.9!important;transform-origin:left top}
+        body.reader-vertical #reader-content{position:absolute;top:0;right:0;box-sizing:border-box;width:100%;min-width:0;height:100%;padding:3rem;direction:ltr;writing-mode:vertical-rl!important;-webkit-writing-mode:vertical-rl!important;line-height:1.9!important}
         body.reader-book{font-size:var(--reader-font)!important}img,svg{max-width:100%;max-height:90vh;object-fit:contain}ruby{ruby-position:over}rt{font-size:.5em;user-select:none;-webkit-user-select:none}${showRuby ? "" : "rt,rp{display:none!important}"}a{color:inherit;text-decoration-color:#b98975;text-underline-offset:.18em}::selection{background:#e9cfae;color:#1f1d19}::highlight(reader-sentence){background:#f3e3ad;color:inherit}::highlight(reader-word){background:#e4b85e;color:#352515}.speech-sentence-active{background:#f3e3ad!important}.speech-word-active{background:#e4b85e!important;color:#352515!important}@media(max-width:700px){body{padding:1.5rem}body.reader-vertical #reader-content{padding:1.5rem}}`;
       const content = mode === "vertical"
         ? `<div id="reader-scroll"><div id="reader-track"><div id="reader-content" class="${originalClass}">${doc.body.innerHTML}</div></div></div>`
@@ -248,29 +257,25 @@ export default function Home() {
     const isVertical = doc.body.classList.contains("reader-vertical");
     const prepareVerticalLayout = () => {
       if (!isVertical || !track || !readerContent) return;
-      const viewportWidth = scroller.clientWidth;
-      if (!viewportWidth) return;
-      track.style.width = `${viewportWidth}px`;
+      const viewportWidth = scroller.clientWidth, viewportHeight = scroller.clientHeight;
+      if (!viewportWidth || !viewportHeight) return;
       readerContent.style.width = `${viewportWidth}px`;
-      readerContent.style.minWidth = "0";
-      readerContent.style.transform = "none";
+      const view = frame.contentWindow;
+      const computed = view?.getComputedStyle(readerContent);
+      const paddingTop = Number.parseFloat(computed?.paddingTop || "0");
+      const paddingBottom = Number.parseFloat(computed?.paddingBottom || "0");
+      const lineHeight = Number.parseFloat(computed?.lineHeight || "") || fontSize * 1.9;
+      const columnHeight = Math.max(fontSize * 2, viewportHeight - paddingTop - paddingBottom);
+      let predictedWidth = viewportWidth;
+      try {
+        const prepared = prepareText(textForLayout(readerContent), `${fontSize}px "Hiragino Mincho ProN", "Yu Mincho", serif`, { whiteSpace: "pre-wrap" });
+        predictedWidth = Math.max(viewportWidth, layoutText(prepared, columnHeight, lineHeight).height + lineHeight * 2);
+      } catch { /* retain one viewport for non-supporting browsers */ }
 
-      const contentRect = readerContent.getBoundingClientRect();
-      const range = doc.createRange();
-      range.selectNodeContents(readerContent);
-      const flowRect = range.getBoundingClientRect();
-      let minLeft = Math.min(contentRect.left, flowRect.left);
-      let maxRight = Math.max(contentRect.right, flowRect.right);
-      readerContent.querySelectorAll("img,svg,table,hr").forEach((node) => {
-        const rect = node.getBoundingClientRect();
-        minLeft = Math.min(minLeft, rect.left);
-        maxRight = Math.max(maxRight, rect.right);
-      });
-
-      const shift = Math.max(0, Math.ceil(contentRect.left - minLeft));
-      const visualWidth = Math.max(viewportWidth, Math.ceil(maxRight - minLeft));
-      track.style.width = `${visualWidth}px`;
-      readerContent.style.transform = shift ? `translateX(${shift}px)` : "none";
+      // Anchor the CSS vertical flow at the right edge of a positive-coordinate
+      // track. Pretext supplies the width, so WebKit never has to report the
+      // negative-left overflow created by writing-mode: vertical-rl.
+      track.style.width = `${Math.ceil(predictedWidth)}px`;
     };
     const updateProgress = () => {
       const max = isVertical ? scroller.scrollWidth - scroller.clientWidth : scroller.scrollHeight - scroller.clientHeight;
