@@ -4,8 +4,83 @@ import { ChangeEvent, DragEvent, useCallback, useEffect, useRef, useState } from
 import { BookState, CachedSpine, PageRef, chapterPages, cleanText, getSpine, mediaType, parseEpub, resolvePath, splitHref } from "./epub";
 
 type ReadingMode = "book" | "vertical" | "horizontal";
+type SpeechNode = { node: Text; nodeStart: number; textStart: number; textEnd: number };
+type SpeechPlan = { text: string; nodes: SpeechNode[] };
 
-function pageKey(page: PageRef) { return `${page.spineIndex}:${page.chunkIndex}`; }
+function buildSpeechPlan(doc: Document, selectedRange?: Range): SpeechPlan {
+  const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+  const nodes: SpeechNode[] = [];
+  let text = "", lastBlock: Element | null = null;
+  while (walker.nextNode()) {
+    const node = walker.currentNode as Text;
+    const parent = node.parentElement;
+    if (!parent || parent.closest("rt,rp,script,style,[aria-hidden='true']")) continue;
+    if (selectedRange) {
+      try { if (!selectedRange.intersectsNode(node)) continue; } catch { continue; }
+    }
+    let nodeStart = selectedRange?.startContainer === node ? selectedRange.startOffset : 0;
+    let nodeEnd = selectedRange?.endContainer === node ? selectedRange.endOffset : node.data.length;
+    nodeStart = Math.max(0, Math.min(nodeStart, node.data.length));
+    nodeEnd = Math.max(nodeStart, Math.min(nodeEnd, node.data.length));
+    const value = node.data.slice(nodeStart, nodeEnd);
+    if (!value) continue;
+    const block = parent.closest("p,li,div,h1,h2,h3,h4,h5,h6,blockquote,td,th") || parent;
+    if (text && block !== lastBlock) text += "\n";
+    const textStart = text.length;
+    text += value;
+    nodes.push({ node, nodeStart, textStart, textEnd: text.length });
+    lastBlock = block;
+  }
+  return { text, nodes };
+}
+
+function speechRanges(plan: SpeechPlan, start: number, end: number) {
+  const ranges: Range[] = [];
+  for (const segment of plan.nodes) {
+    const from = Math.max(start, segment.textStart), to = Math.min(end, segment.textEnd);
+    if (from >= to) continue;
+    const range = segment.node.ownerDocument.createRange();
+    range.setStart(segment.node, segment.nodeStart + from - segment.textStart);
+    range.setEnd(segment.node, segment.nodeStart + to - segment.textStart);
+    ranges.push(range);
+  }
+  return ranges;
+}
+
+function clearSpeechHighlights(doc?: Document | null) {
+  if (!doc) return;
+  const view = doc.defaultView as unknown as { CSS?: { highlights?: { delete(name: string): void } } };
+  view.CSS?.highlights?.delete("reader-sentence");
+  view.CSS?.highlights?.delete("reader-word");
+  doc.querySelectorAll(".speech-sentence-active,.speech-word-active").forEach((node) => node.classList.remove("speech-sentence-active", "speech-word-active"));
+}
+
+function setSpeechHighlight(doc: Document, name: "reader-sentence" | "reader-word", ranges: Range[], scroll = false) {
+  const fallback = name === "reader-sentence" ? "speech-sentence-active" : "speech-word-active";
+  doc.querySelectorAll(`.${fallback}`).forEach((node) => node.classList.remove(fallback));
+  const view = doc.defaultView as unknown as {
+    CSS?: { highlights?: { set(name: string, value: unknown): void; delete(name: string): void } };
+    Highlight?: new (...ranges: Range[]) => unknown;
+  };
+  if (view.CSS?.highlights && view.Highlight) {
+    view.CSS.highlights.delete(name);
+    if (ranges.length) view.CSS.highlights.set(name, new view.Highlight(...ranges));
+  } else {
+    ranges.forEach((range) => (range.startContainer.parentElement || range.startContainer.parentNode as Element | null)?.closest("p,li,div,h1,h2,h3,h4,h5,h6,blockquote")?.classList.add(fallback));
+  }
+  if (scroll && ranges[0]) {
+    const element = ranges[0].startContainer.parentElement;
+    element?.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+  }
+}
+
+function textSegments(text: string, granularity: "sentence" | "word") {
+  if (typeof Intl.Segmenter === "function") {
+    return [...new Intl.Segmenter("ja", { granularity }).segment(text)].map((item) => ({ start: item.index, end: item.index + item.segment.length, text: item.segment })).filter((item) => item.text.trim());
+  }
+  const expression = granularity === "sentence" ? /[^。！？!?\n]+[。！？!?]?/g : /\S/g;
+  return [...text.matchAll(expression)].map((item) => ({ start: item.index || 0, end: (item.index || 0) + item[0].length, text: item[0] }));
+}
 
 export default function Home() {
   const [book, setBook] = useState<BookState | null>(null);
@@ -27,6 +102,7 @@ export default function Home() {
   const spineCache = useRef(new Map<string, CachedSpine>());
   const pendingAnchor = useRef("");
   const renderSequence = useRef(0);
+  const speechRun = useRef(0);
 
   const notify = useCallback((message: string) => {
     setToast(message);
@@ -71,6 +147,10 @@ export default function Home() {
 
   useEffect(() => {
     if (!book) return;
+    speechRun.current += 1;
+    window.speechSynthesis?.cancel();
+    clearSpeechHighlights(frameRef.current?.contentDocument);
+    setSpeaking(false);
     const sequence = ++renderSequence.current;
     const urls: string[] = [];
     let cancelled = false;
@@ -100,7 +180,7 @@ export default function Home() {
         body{box-sizing:border-box;min-height:100%;margin:0;padding:3rem;font-size:var(--reader-font);color:#292823;background:#fbf8f1;font-family:"Noto Serif JP","Yu Mincho","Hiragino Mincho ProN",serif;text-rendering:optimizeLegibility}
         body.reader-horizontal{writing-mode:horizontal-tb!important;-webkit-writing-mode:horizontal-tb!important;max-width:820px;height:auto!important;margin:0 auto;line-height:1.95!important;overflow:visible!important}
         body.reader-vertical{writing-mode:vertical-rl!important;-webkit-writing-mode:vertical-rl!important;height:100vh!important;min-width:100%;line-height:1.9!important;overflow-x:auto!important;overflow-y:hidden!important}
-        body.reader-book{font-size:var(--reader-font)!important}img,svg{max-width:100%;max-height:90vh;object-fit:contain}ruby{ruby-position:over}rt{font-size:.5em;user-select:none;-webkit-user-select:none}${showRuby ? "" : "rt,rp{display:none!important}"}a{color:inherit;text-decoration-color:#b98975;text-underline-offset:.18em}::selection{background:#e9cfae;color:#1f1d19}@media(max-width:700px){body{padding:1.5rem}}`;
+        body.reader-book{font-size:var(--reader-font)!important}img,svg{max-width:100%;max-height:90vh;object-fit:contain}ruby{ruby-position:over}rt{font-size:.5em;user-select:none;-webkit-user-select:none}${showRuby ? "" : "rt,rp{display:none!important}"}a{color:inherit;text-decoration-color:#b98975;text-underline-offset:.18em}::selection{background:#e9cfae;color:#1f1d19}::highlight(reader-sentence){background:#f3e3ad;color:inherit}::highlight(reader-word){background:#e4b85e;color:#352515}.speech-sentence-active{background:#f3e3ad!important}.speech-word-active{background:#e4b85e!important;color:#352515!important}@media(max-width:700px){body{padding:1.5rem}}`;
       setFrameHtml(`<!doctype html><html lang="ja"><head><meta charset="utf-8"><style>${style}</style></head><body class="${originalClass} ${readerClass}" translate="yes">${doc.body.innerHTML}</body></html>`);
       localStorage.setItem(`furigana-reader:${book.title}:location`, JSON.stringify({ spineIndex, chunkIndex: safeChunk }));
       setLocalProgress(0);
@@ -112,7 +192,9 @@ export default function Home() {
   }, [book, chunkIndex, fontSize, mode, notify, showRuby, spineIndex]);
 
   useEffect(() => () => {
+    speechRun.current += 1;
     window.speechSynthesis?.cancel();
+    clearSpeechHighlights(frameRef.current?.contentDocument);
   }, []);
 
   const goToPage = useCallback((page: PageRef, anchor = "") => {
@@ -211,20 +293,63 @@ export default function Home() {
 
   const speak = () => {
     if (!("speechSynthesis" in window)) { notify("当前浏览器不支持朗读"); return; }
-    if (speaking) { window.speechSynthesis.cancel(); setSpeaking(false); return; }
     const doc = frameRef.current?.contentDocument;
+    if (speaking) {
+      speechRun.current += 1;
+      window.speechSynthesis.cancel();
+      clearSpeechHighlights(doc);
+      setSpeaking(false);
+      return;
+    }
     if (!doc) return;
     const selection = doc.getSelection();
-    const text = selection && !selection.isCollapsed && selection.rangeCount
-      ? (() => { const div = doc.createElement("div"); div.appendChild(selection.getRangeAt(0).cloneContents()); return cleanText(div); })()
-      : cleanText(doc.body);
-    if (!text) return;
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = "ja-JP"; utterance.rate = .92;
+    const selectedRange = selection && !selection.isCollapsed && selection.rangeCount ? selection.getRangeAt(0).cloneRange() : undefined;
+    const plan = buildSpeechPlan(doc, selectedRange);
+    if (!plan.text.trim()) return;
+    selection?.removeAllRanges();
+    const sentences = textSegments(plan.text, "sentence").flatMap((sentence) => {
+      if (sentence.end - sentence.start <= 220) return [sentence];
+      const chunks = [];
+      for (let start = sentence.start; start < sentence.end; start += 180) chunks.push({ start, end: Math.min(start + 180, sentence.end), text: plan.text.slice(start, Math.min(start + 180, sentence.end)) });
+      return chunks;
+    });
+    const words = textSegments(plan.text, "word");
     const voice = window.speechSynthesis.getVoices().find((item) => item.lang.toLowerCase().startsWith("ja"));
-    if (voice) utterance.voice = voice;
-    utterance.onend = () => setSpeaking(false); utterance.onerror = () => setSpeaking(false);
-    window.speechSynthesis.cancel(); window.speechSynthesis.speak(utterance); setSpeaking(true);
+    const run = ++speechRun.current;
+    window.speechSynthesis.cancel();
+    clearSpeechHighlights(doc);
+    setSpeaking(true);
+    const speakSentence = (index: number) => {
+      if (run !== speechRun.current) return;
+      if (index >= sentences.length) {
+        clearSpeechHighlights(doc);
+        setSpeaking(false);
+        return;
+      }
+      const sentence = sentences[index];
+      const utterance = new SpeechSynthesisUtterance(sentence.text);
+      utterance.lang = "ja-JP"; utterance.rate = .92;
+      if (voice) utterance.voice = voice;
+      utterance.onstart = () => {
+        if (run !== speechRun.current) return;
+        setSpeechHighlight(doc, "reader-sentence", speechRanges(plan, sentence.start, sentence.end), true);
+        setSpeechHighlight(doc, "reader-word", [], false);
+      };
+      utterance.onboundary = (event) => {
+        if (run !== speechRun.current) return;
+        const position = sentence.start + event.charIndex;
+        const word = words.find((item) => item.start <= position && position < item.end) || words.find((item) => item.start >= position);
+        if (word) setSpeechHighlight(doc, "reader-word", speechRanges(plan, word.start, word.end));
+      };
+      utterance.onend = () => speakSentence(index + 1);
+      utterance.onerror = (event) => {
+        if (event.error === "canceled" || event.error === "interrupted") return;
+        clearSpeechHighlights(doc);
+        setSpeaking(false);
+      };
+      window.speechSynthesis.speak(utterance);
+    };
+    speakSentence(0);
   };
 
   const changeFile = (event: ChangeEvent<HTMLInputElement>) => {
