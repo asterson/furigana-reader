@@ -82,6 +82,61 @@ function textSegments(text: string, granularity: "sentence" | "word") {
   return [...text.matchAll(expression)].map((item) => ({ start: item.index || 0, end: (item.index || 0) + item[0].length, text: item[0] }));
 }
 
+function frameScroller(doc: Document) {
+  return doc.getElementById("reader-scroll") as HTMLElement | null
+    || doc.scrollingElement as HTMLElement | null
+    || doc.documentElement;
+}
+
+function frameProgress(doc: Document) {
+  const scroller = frameScroller(doc);
+  const content = doc.getElementById("reader-content");
+  const vertical = getComputedStyle(content || doc.body).writingMode.startsWith("vertical");
+  const max = Math.max(0, vertical
+    ? scroller.scrollWidth - scroller.clientWidth
+    : scroller.scrollHeight - scroller.clientHeight);
+  const current = vertical
+    ? scroller.id === "reader-scroll" ? max - scroller.scrollLeft : Math.abs(scroller.scrollLeft)
+    : scroller.scrollTop;
+  return { scroller, vertical, max, current: Math.max(0, Math.min(max, current)) };
+}
+
+function isolateVerticalScroller(doc: Document) {
+  const body = doc.body;
+  const writingMode = getComputedStyle(body).writingMode;
+  if (!writingMode.startsWith("vertical")) return;
+
+  const bodyStyle = doc.defaultView?.getComputedStyle(body);
+  const content = doc.createElement("div");
+  const scroller = doc.createElement("div");
+  content.id = "reader-content";
+  scroller.id = "reader-scroll";
+  content.style.setProperty("writing-mode", writingMode, "important");
+  content.style.setProperty("-webkit-writing-mode", writingMode, "important");
+  content.style.direction = bodyStyle?.direction || "ltr";
+  content.style.padding = bodyStyle
+    ? `${bodyStyle.paddingTop} ${bodyStyle.paddingRight} ${bodyStyle.paddingBottom} ${bodyStyle.paddingLeft}`
+    : "0";
+
+  [...body.childNodes].forEach((node) => content.appendChild(node));
+  scroller.appendChild(content);
+  body.appendChild(scroller);
+
+  // iOS WebKit can paint and hit-test vertical overflow incorrectly when the
+  // iframe root itself is vertical. Keep the roots horizontal and scroll an
+  // explicit inner container instead.
+  for (const root of [doc.documentElement, body]) {
+    root.style.setProperty("writing-mode", "horizontal-tb", "important");
+    root.style.setProperty("-webkit-writing-mode", "horizontal-tb", "important");
+    root.style.setProperty("width", "100%", "important");
+    root.style.setProperty("height", "100%", "important");
+    root.style.setProperty("overflow", "hidden", "important");
+  }
+  body.style.setProperty("min-height", "0", "important");
+  body.style.setProperty("padding", "0", "important");
+  body.style.setProperty("direction", "ltr", "important");
+}
+
 export default function Home() {
   const [book, setBook] = useState<BookState | null>(null);
   const [spineIndex, setSpineIndex] = useState(0);
@@ -172,6 +227,12 @@ export default function Home() {
         urls.push(url);
         image.setAttribute(attr, url);
       }));
+      doc.querySelectorAll("a[href]").forEach((link) => {
+        const href = link.getAttribute("href") || "";
+        if (!href || /^(?:https?:|mailto:|tel:)/i.test(href)) return;
+        link.setAttribute("data-reader-href", href);
+        link.setAttribute("href", "#reader-link");
+      });
       if (cancelled || sequence !== renderSequence.current) return;
       const readerClass = mode === "horizontal" ? "reader-horizontal" : mode === "vertical" ? "reader-vertical" : "reader-book";
       const originalClass = cached.bodyClass.replace(/[^a-zA-Z0-9 _-]/g, "");
@@ -180,11 +241,12 @@ export default function Home() {
         body{box-sizing:border-box;min-height:100%;margin:0;padding:3rem;font-size:var(--reader-font);color:#292823;background:#fbf8f1;font-family:"Noto Serif JP","Yu Mincho","Hiragino Mincho ProN",serif;text-rendering:optimizeLegibility}
         body.reader-horizontal{writing-mode:horizontal-tb!important;-webkit-writing-mode:horizontal-tb!important;max-width:820px;height:auto!important;margin:0 auto;line-height:1.95!important;overflow:visible!important}
         body.reader-vertical{writing-mode:vertical-rl!important;-webkit-writing-mode:vertical-rl!important;width:max-content!important;min-width:100%!important;height:100%!important;min-height:0!important;line-height:1.9!important;overflow:visible!important}
+        #reader-scroll{box-sizing:border-box;width:100%;height:100%;overflow-x:auto;overflow-y:hidden;direction:ltr;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;touch-action:pan-x}
+        #reader-content{box-sizing:border-box;width:max-content;min-width:100%;height:100%;min-height:0;line-height:inherit}
         body.reader-book{font-size:var(--reader-font)!important}img,svg{max-width:100%;max-height:90vh;object-fit:contain}ruby{ruby-position:over}rt{font-size:.5em;user-select:none;-webkit-user-select:none}${showRuby ? "" : "rt,rp{display:none!important}"}a{color:inherit;text-decoration-color:#b98975;text-underline-offset:.18em}::selection{background:#e9cfae;color:#1f1d19}::highlight(reader-sentence){background:#f3e3ad;color:inherit}::highlight(reader-word){background:#e4b85e;color:#352515}.speech-sentence-active{background:#f3e3ad!important}.speech-word-active{background:#e4b85e!important;color:#352515!important}@media(max-width:700px){body{padding:1.5rem}}`;
       setFrameHtml(`<!doctype html><html lang="ja"><head><meta charset="utf-8"><style>${style}</style></head><body class="${originalClass} ${readerClass}" translate="yes">${doc.body.innerHTML}</body></html>`);
       localStorage.setItem(`furigana-reader:${book.title}:location`, JSON.stringify({ spineIndex, chunkIndex: safeChunk }));
       setLocalProgress(0);
-      setLoading(false);
     })().catch(() => {
       if (!cancelled) { setLoading(false); notify("这一页读取失败"); }
     });
@@ -233,15 +295,33 @@ export default function Home() {
     } else goToPage({ spineIndex: targetSpine, chunkIndex: targetChunk }, anchor);
   }, [book, chunkIndex, goToPage, notify, spineIndex]);
 
+  useEffect(() => {
+    if (!book) return;
+    let raf = 0;
+    let last = 0;
+    const tick = (now: number) => {
+      if (now - last >= 200) {
+        last = now;
+        const doc = frameRef.current?.contentDocument;
+        if (doc) {
+          const { max, current } = frameProgress(doc);
+          setLocalProgress(max > 0 ? Math.min(100, Math.round(current / max * 100)) : 100);
+        }
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [book]);
+
   const attachFrameEvents = () => {
     const frame = frameRef.current, doc = frame?.contentDocument;
     if (!frame || !doc) return;
+    isolateVerticalScroller(doc);
+    const view = frame.contentWindow;
+    const scroller = frameScroller(doc);
     const updateProgress = () => {
-      const root = doc.scrollingElement || doc.documentElement;
-      const writingMode = getComputedStyle(doc.body).writingMode;
-      const vertical = writingMode.startsWith("vertical");
-      const max = vertical ? root.scrollWidth - root.clientWidth : root.scrollHeight - root.clientHeight;
-      const current = vertical ? Math.abs(root.scrollLeft) : root.scrollTop;
+      const { max, current } = frameProgress(doc);
       setLocalProgress(max > 0 ? Math.min(100, Math.round(current / max * 100)) : 100);
     };
     doc.addEventListener("copy", (event) => {
@@ -254,20 +334,33 @@ export default function Home() {
     });
     doc.addEventListener("click", (event) => {
       const target = event.target as Element | null;
-      const link = target?.closest("a[href]") as HTMLAnchorElement | null;
+      const link = target?.closest("a[href],a[data-reader-href]") as HTMLAnchorElement | null;
       if (!link) return;
       event.preventDefault();
-      navigateHref(link.getAttribute("href") || "");
-    });
+      event.stopPropagation();
+      navigateHref(link.getAttribute("data-reader-href") || link.getAttribute("href") || "");
+    }, true);
+    scroller.addEventListener("scroll", updateProgress, { passive: true });
     doc.addEventListener("scroll", updateProgress, { passive: true });
-    window.setTimeout(() => {
+    view?.addEventListener("scroll", updateProgress, { passive: true });
+
+    let layoutFinished = false;
+    const finishLayout = () => {
+      if (layoutFinished) return;
+      layoutFinished = true;
       const anchor = pendingAnchor.current;
       if (anchor) {
         doc.getElementById(anchor)?.scrollIntoView({ behavior: "auto", block: "start" });
         pendingAnchor.current = "";
+      } else {
+        const metrics = frameProgress(doc);
+        if (metrics.vertical && metrics.scroller.id === "reader-scroll") metrics.scroller.scrollLeft = metrics.max;
       }
       updateProgress();
-    }, 0);
+      setLoading(false);
+    };
+    view?.requestAnimationFrame(() => view.requestAnimationFrame(finishLayout));
+    window.setTimeout(finishLayout, 120);
   };
 
   const pagePosition = Math.max(0, pages.findIndex((page) => page.spineIndex === spineIndex && page.chunkIndex === chunkIndex));
