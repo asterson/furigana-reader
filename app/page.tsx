@@ -7,6 +7,32 @@ type ReadingMode = "book" | "vertical" | "horizontal";
 type SpeechNode = { node: Text; nodeStart: number; textStart: number; textEnd: number };
 type SpeechPlan = { text: string; nodes: SpeechNode[] };
 
+// This is the only script allowed to run inside the sanitized EPUB frame. It
+// intercepts navigation before iOS WebKit can apply the frame's default URL
+// resolution, then asks the parent reader to resolve the EPUB target.
+const frameScript = `
+(function () {
+  "use strict";
+  var send = function (href) {
+    if (!href) return;
+    parent.postMessage(JSON.stringify({ source: "furigana-reader", type: "navigate", href: href }), "*");
+  };
+  document.addEventListener("click", function (event) {
+    var link = event.target && event.target.closest ? event.target.closest("a[data-reader-href]") : null;
+    if (!link) return;
+    event.preventDefault();
+    event.stopPropagation();
+    send(link.getAttribute("data-reader-href"));
+  }, true);
+  document.addEventListener("keydown", function (event) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    var link = event.target && event.target.closest ? event.target.closest("a[data-reader-href]") : null;
+    if (!link) return;
+    event.preventDefault();
+    send(link.getAttribute("data-reader-href"));
+  });
+})();`;
+
 function buildSpeechPlan(doc: Document, selectedRange?: Range): SpeechPlan {
   const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
   const nodes: SpeechNode[] = [];
@@ -158,6 +184,7 @@ export default function Home() {
   const pendingAnchor = useRef("");
   const renderSequence = useRef(0);
   const speechRun = useRef(0);
+  const frameCleanup = useRef<(() => void) | null>(null);
 
   const notify = useCallback((message: string) => {
     setToast(message);
@@ -205,13 +232,13 @@ export default function Home() {
     speechRun.current += 1;
     window.speechSynthesis?.cancel();
     clearSpeechHighlights(frameRef.current?.contentDocument);
-    setSpeaking(false);
     const sequence = ++renderSequence.current;
     const urls: string[] = [];
     let cancelled = false;
     (async () => {
       setLoading(true);
       const cached = await getSpine(book, spineIndex, spineCache.current);
+      setSpeaking(false);
       const safeChunk = Math.min(chunkIndex, cached.chunks.length - 1);
       if (safeChunk !== chunkIndex) { setChunkIndex(safeChunk); return; }
       const doc = new DOMParser().parseFromString(`<body>${cached.chunks[safeChunk]}</body>`, "text/html");
@@ -232,6 +259,8 @@ export default function Home() {
         if (!href || /^(?:https?:|mailto:|tel:)/i.test(href)) return;
         link.setAttribute("data-reader-href", href);
         link.setAttribute("href", "#reader-link");
+        link.setAttribute("role", "link");
+        link.setAttribute("tabindex", "0");
       });
       if (cancelled || sequence !== renderSequence.current) return;
       const readerClass = mode === "horizontal" ? "reader-horizontal" : mode === "vertical" ? "reader-vertical" : "reader-book";
@@ -244,7 +273,7 @@ export default function Home() {
         #reader-scroll{box-sizing:border-box;width:100%;height:100%;overflow-x:auto;overflow-y:hidden;direction:ltr;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;touch-action:pan-x}
         #reader-content{box-sizing:border-box;width:max-content;min-width:100%;height:100%;min-height:0;line-height:inherit}
         body.reader-book{font-size:var(--reader-font)!important}img,svg{max-width:100%;max-height:90vh;object-fit:contain}ruby{ruby-position:over}rt{font-size:.5em;user-select:none;-webkit-user-select:none}${showRuby ? "" : "rt,rp{display:none!important}"}a{color:inherit;text-decoration-color:#b98975;text-underline-offset:.18em}::selection{background:#e9cfae;color:#1f1d19}::highlight(reader-sentence){background:#f3e3ad;color:inherit}::highlight(reader-word){background:#e4b85e;color:#352515}.speech-sentence-active{background:#f3e3ad!important}.speech-word-active{background:#e4b85e!important;color:#352515!important}@media(max-width:700px){body{padding:1.5rem}}`;
-      setFrameHtml(`<!doctype html><html lang="ja"><head><meta charset="utf-8"><style>${style}</style></head><body class="${originalClass} ${readerClass}" translate="yes">${doc.body.innerHTML}</body></html>`);
+      setFrameHtml(`<!doctype html><html lang="ja"><head><meta charset="utf-8"><style>${style}</style></head><body class="${originalClass} ${readerClass}" translate="yes">${doc.body.innerHTML}<script>${frameScript}</script></body></html>`);
       localStorage.setItem(`furigana-reader:${book.title}:location`, JSON.stringify({ spineIndex, chunkIndex: safeChunk }));
       setLocalProgress(0);
     })().catch(() => {
@@ -257,6 +286,8 @@ export default function Home() {
     speechRun.current += 1;
     window.speechSynthesis?.cancel();
     clearSpeechHighlights(frameRef.current?.contentDocument);
+    frameCleanup.current?.();
+    frameCleanup.current = null;
   }, []);
 
   const goToPage = useCallback((page: PageRef, anchor = "") => {
@@ -332,14 +363,16 @@ export default function Home() {
       event.preventDefault();
       event.clipboardData?.setData("text/plain", cleanText(wrapper));
     });
-    doc.addEventListener("click", (event) => {
-      const target = event.target as Element | null;
-      const link = target?.closest("a[href],a[data-reader-href]") as HTMLAnchorElement | null;
-      if (!link) return;
-      event.preventDefault();
-      event.stopPropagation();
-      navigateHref(link.getAttribute("data-reader-href") || link.getAttribute("href") || "");
-    }, true);
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== view) return;
+      let data: { source?: string; type?: string; href?: string };
+      try { data = JSON.parse(String(event.data)); } catch { return; }
+      if (data.source !== "furigana-reader" || data.type !== "navigate") return;
+      navigateHref(data.href || "");
+    };
+    frameCleanup.current?.();
+    window.addEventListener("message", onMessage);
+    frameCleanup.current = () => window.removeEventListener("message", onMessage);
     scroller.addEventListener("scroll", updateProgress, { passive: true });
     doc.addEventListener("scroll", updateProgress, { passive: true });
     view?.addEventListener("scroll", updateProgress, { passive: true });
@@ -480,7 +513,7 @@ export default function Home() {
         <nav aria-label="书籍目录">{book.toc.map((item, index) => <button key={`${item.href}-${index}`} className={index === tocIndex ? "current" : ""} onClick={() => goToToc(index)}><span>{String(index + 1).padStart(2, "0")}</span>{item.title}</button>)}</nav></aside>
         <section className="reading-stage"><div className="tools"><div className="segmented" aria-label="排版方向"><button className={mode === "book" ? "selected" : ""} onClick={() => setMode("book")}>原书</button><button className={mode === "vertical" ? "selected" : ""} onClick={() => setMode("vertical")}>纵排</button><button className={mode === "horizontal" ? "selected" : ""} onClick={() => setMode("horizontal")}>横排</button></div>
           <label className="font-control"><span>字</span><input type="range" min="14" max="28" value={fontSize} onChange={(e) => setFontSize(Number(e.target.value))} /><span>字</span></label><label className="switch"><input type="checkbox" checked={showRuby} onChange={(e) => setShowRuby(e.target.checked)} /><span />显示假名</label></div>
-          <div className="page-frame">{loading && <div className="loading"><span />排版中…</div>}<iframe ref={frameRef} title={currentToc?.title || "正文"} srcDoc={frameHtml} onLoad={attachFrameEvents} sandbox="allow-same-origin allow-popups" /></div>
+          <div className="page-frame">{loading && <div className="loading"><span />排版中…</div>}<iframe ref={frameRef} title={currentToc?.title || "正文"} srcDoc={frameHtml} onLoad={attachFrameEvents} sandbox="allow-same-origin allow-scripts allow-popups" /></div>
           <div className="page-nav"><button disabled={atBookStart} onClick={() => movePage(-1)}>← 上一页</button><div className="chapter-jump"><span>本章</span><input aria-label="章节内进度" type="range" min="0" max={Math.max(0, pages.length - 1)} value={pagePosition} onChange={(e) => goToPage(pages[Number(e.target.value)] || pages[0])} /><small>{pagePosition + 1}/{Math.max(1, pages.length)} · 页内 {localProgress}%</small></div><button disabled={atBookEnd} onClick={() => movePage(1)}>下一页 →</button></div>
         </section></div>{toast && <div className="toast">{toast}</div>}
     </main>
