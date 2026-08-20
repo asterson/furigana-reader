@@ -176,10 +176,10 @@ export default function Home() {
       const readerClass = mode === "horizontal" ? "reader-horizontal" : mode === "vertical" ? "reader-vertical" : "reader-book";
       const originalClass = cached.bodyClass.replace(/[^a-zA-Z0-9 _-]/g, "");
       const style = `${book.css}
-        :root{color-scheme:light;--reader-font:${fontSize}px}html{height:100%;background:#fbf8f1;scroll-behavior:smooth}
+        :root{color-scheme:light;--reader-font:${fontSize}px}html{width:100%;height:100%;overflow:auto;background:#fbf8f1;scroll-behavior:smooth}
         body{box-sizing:border-box;min-height:100%;margin:0;padding:3rem;font-size:var(--reader-font);color:#292823;background:#fbf8f1;font-family:"Noto Serif JP","Yu Mincho","Hiragino Mincho ProN",serif;text-rendering:optimizeLegibility}
         body.reader-horizontal{writing-mode:horizontal-tb!important;-webkit-writing-mode:horizontal-tb!important;max-width:820px;height:auto!important;margin:0 auto;line-height:1.95!important;overflow:visible!important}
-        body.reader-vertical{writing-mode:vertical-rl!important;-webkit-writing-mode:vertical-rl!important;height:100vh!important;min-width:100%;line-height:1.9!important;overflow-x:auto!important;overflow-y:hidden!important}
+        body.reader-vertical{writing-mode:vertical-rl!important;-webkit-writing-mode:vertical-rl!important;width:max-content!important;min-width:100%!important;height:100%!important;min-height:0!important;line-height:1.9!important;overflow:visible!important}
         body.reader-book{font-size:var(--reader-font)!important}img,svg{max-width:100%;max-height:90vh;object-fit:contain}ruby{ruby-position:over}rt{font-size:.5em;user-select:none;-webkit-user-select:none}${showRuby ? "" : "rt,rp{display:none!important}"}a{color:inherit;text-decoration-color:#b98975;text-underline-offset:.18em}::selection{background:#e9cfae;color:#1f1d19}::highlight(reader-sentence){background:#f3e3ad;color:inherit}::highlight(reader-word){background:#e4b85e;color:#352515}.speech-sentence-active{background:#f3e3ad!important}.speech-word-active{background:#e4b85e!important;color:#352515!important}@media(max-width:700px){body{padding:1.5rem}}`;
       setFrameHtml(`<!doctype html><html lang="ja"><head><meta charset="utf-8"><style>${style}</style></head><body class="${originalClass} ${readerClass}" translate="yes">${doc.body.innerHTML}</body></html>`);
       localStorage.setItem(`furigana-reader:${book.title}:location`, JSON.stringify({ spineIndex, chunkIndex: safeChunk }));
