@@ -180,7 +180,7 @@ export default function Home() {
         body{box-sizing:border-box;min-height:100%;margin:0;padding:3rem;font-size:var(--reader-font);color:#292823;background:#fbf8f1;font-family:"Noto Serif JP","Yu Mincho","Hiragino Mincho ProN",serif;text-rendering:optimizeLegibility}
         body.reader-horizontal{writing-mode:horizontal-tb!important;-webkit-writing-mode:horizontal-tb!important;max-width:820px;height:auto!important;margin:0 auto;line-height:1.95!important;overflow:visible!important}
         body.reader-vertical{width:100%!important;height:100%!important;min-height:0!important;padding:0!important;overflow:hidden!important}
-        body.reader-vertical #reader-scroll{box-sizing:border-box;width:100%;height:100%;overflow-x:auto;overflow-y:hidden;direction:rtl;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}
+        body.reader-vertical #reader-scroll{box-sizing:border-box;width:100%;height:100%;overflow-x:auto;overflow-y:hidden;direction:ltr;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}
         body.reader-vertical #reader-content{box-sizing:border-box;width:max-content;min-width:100%;height:100%;padding:3rem;direction:ltr;writing-mode:vertical-rl!important;-webkit-writing-mode:vertical-rl!important;line-height:1.9!important}
         body.reader-book{font-size:var(--reader-font)!important}img,svg{max-width:100%;max-height:90vh;object-fit:contain}ruby{ruby-position:over}rt{font-size:.5em;user-select:none;-webkit-user-select:none}${showRuby ? "" : "rt,rp{display:none!important}"}a{color:inherit;text-decoration-color:#b98975;text-underline-offset:.18em}::selection{background:#e9cfae;color:#1f1d19}::highlight(reader-sentence){background:#f3e3ad;color:inherit}::highlight(reader-word){background:#e4b85e;color:#352515}.speech-sentence-active{background:#f3e3ad!important}.speech-word-active{background:#e4b85e!important;color:#352515!important}@media(max-width:700px){body{padding:1.5rem}body.reader-vertical #reader-content{padding:1.5rem}}`;
       const content = mode === "vertical"
@@ -242,13 +242,10 @@ export default function Home() {
     const frame = frameRef.current, doc = frame?.contentDocument;
     if (!frame || !doc) return;
     const scroller = doc.getElementById("reader-scroll") || doc.scrollingElement || doc.documentElement;
-    const content = doc.getElementById("reader-content");
     const updateProgress = () => {
       const vertical = doc.body.classList.contains("reader-vertical");
       const max = vertical ? scroller.scrollWidth - scroller.clientWidth : scroller.scrollHeight - scroller.clientHeight;
-      const current = vertical && content
-        ? Math.abs(content.getBoundingClientRect().right - scroller.getBoundingClientRect().right)
-        : scroller.scrollTop;
+      const current = vertical ? Math.max(0, max - scroller.scrollLeft) : scroller.scrollTop;
       setLocalProgress(max > 0 ? Math.min(100, Math.round(current / max * 100)) : 100);
     };
     doc.addEventListener("copy", (event) => {
@@ -267,14 +264,22 @@ export default function Home() {
       navigateHref(link.getAttribute("href") || "");
     });
     scroller.addEventListener("scroll", updateProgress, { passive: true });
-    window.setTimeout(() => {
+    let positioned = false;
+    const positionContent = () => {
+      if (positioned) return;
+      positioned = true;
       const anchor = pendingAnchor.current;
       if (anchor) {
         doc.getElementById(anchor)?.scrollIntoView({ behavior: "auto", block: "start" });
         pendingAnchor.current = "";
+      } else if (doc.body.classList.contains("reader-vertical")) {
+        scroller.scrollLeft = scroller.scrollWidth - scroller.clientWidth;
       }
       updateProgress();
-    }, 0);
+    };
+    const view = frame.contentWindow;
+    if (view) view.requestAnimationFrame(() => view.requestAnimationFrame(positionContent));
+    window.setTimeout(positionContent, 120);
   };
 
   const pagePosition = Math.max(0, pages.findIndex((page) => page.spineIndex === spineIndex && page.chunkIndex === chunkIndex));
