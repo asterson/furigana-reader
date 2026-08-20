@@ -142,12 +142,25 @@ export async function getSpine(book: BookState, index: number, cache: Map<string
   const tocAnchors = new Set(book.toc.filter((item) => item.path === spineItem.path && item.anchor).map((item) => item.anchor));
   const chunks: string[] = [], anchorToChunk = new Map<string, number>();
   let group: Node[] = [], chars = 0, elements = 0, anchors: string[] = [];
+  let pendingAnchors: string[] = [];
   let keepWithNext = false;
   const flush = () => {
     if (!group.length) return;
+    const hasVisibleContent = group.some((node) => {
+      if (node.textContent?.trim()) return true;
+      if (node.nodeType !== Node.ELEMENT_NODE) return false;
+      const element = node as Element;
+      return element.matches("img,svg,hr,table") || Boolean(element.querySelector("img,svg,hr,table"));
+    });
+    if (!hasVisibleContent) {
+      pendingAnchors.push(...anchors);
+      group = []; chars = 0; elements = 0; anchors = [];
+      return;
+    }
     const chunkIndex = chunks.length;
     chunks.push(group.map(nodeHtml).join(""));
-    anchors.forEach((anchor) => anchorToChunk.set(anchor, chunkIndex));
+    [...pendingAnchors, ...anchors].forEach((anchor) => anchorToChunk.set(anchor, chunkIndex));
+    pendingAnchors = [];
     group = []; chars = 0; elements = 0; anchors = [];
   };
   [...body.childNodes].forEach((node) => {
@@ -175,6 +188,7 @@ export async function getSpine(book: BookState, index: number, cache: Map<string
     }
   });
   flush();
+  if (pendingAnchors.length && chunks.length) pendingAnchors.forEach((anchor) => anchorToChunk.set(anchor, chunks.length - 1));
   const result = { chunks: chunks.length ? chunks : [""], anchorToChunk, bodyClass: body.getAttribute("class") || "" };
   cache.set(spineItem.path, result);
   return result;
